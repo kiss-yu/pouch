@@ -20,9 +20,11 @@ env:
   - TEST_SUITE=criv1alpha1test
   - TEST_SUITE=criv1alpha2test
 
+
 script: |
+  set -e # fast fail
   if [[ "${TEST_SUITE}" = "unittest" ]]; then
-    hack/install/install_ci_related.sh
+    sudo env "PATH=$PATH" hack/install/install_ci_related.sh
     make unit-test
     make coverage
   elif [[ "${TEST_SUITE}" = "integrationtest" ]]; then
@@ -31,7 +33,7 @@ script: |
     TEST_FLAGS= make build-integration-test
     sudo env "PATH=$PATH" make install
 
-    sudo env "PATH=$PATH" make download_dependencies
+    sudo env "PATH=$PATH" make download-dependencies
     sudo env "PATH=$PATH" make integration-test
     make coverage
   elif [[ "${TEST_SUITE}" = "criv1alpha1test" ]]; then
@@ -39,7 +41,7 @@ script: |
     TEST_FLAGS= make build-daemon-integration
     sudo env "PATH=$PATH" make install
 
-    sudo env "PATH=$PATH" make download_dependencies
+    sudo env "PATH=$PATH" make download-dependencies
     sudo env "PATH=$PATH" make cri-v1alpha1-test
     make coverage
   else
@@ -47,7 +49,7 @@ script: |
     TEST_FLAGS= make build-daemon-integration
     sudo env "PATH=$PATH" make install
 
-    sudo env "PATH=$PATH" make download_dependencies
+    sudo env "PATH=$PATH" make download-dependencies
     sudo env "PATH=$PATH" make cri-v1alpha2-test
     make coverage
   fi

@@ -83,15 +83,15 @@ type container struct {
 	rich       bool
 	richMode   string
 	initScript string
+
+	// nvidia container
+	nvidiaVisibleDevices     string
+	nvidiaDriverCapabilities string
 }
 
 func (c *container) config() (*types.ContainerCreateConfig, error) {
 	labels, err := opts.ParseLabels(c.labels)
 	if err != nil {
-		return nil, err
-	}
-
-	if err := opts.ValidateMemorySwappiness(c.memorySwappiness); err != nil {
 		return nil, err
 	}
 
@@ -140,18 +140,6 @@ func (c *container) config() (*types.ContainerCreateConfig, error) {
 
 	specAnnotation, err := opts.ParseAnnotation(c.specAnnotation)
 	if err != nil {
-		return nil, err
-	}
-
-	if err := opts.ValidateOOMScore(c.oomScoreAdj); err != nil {
-		return nil, err
-	}
-
-	if err := opts.ValidateCPUPeriod(c.cpuperiod); err != nil {
-		return nil, err
-	}
-
-	if err := opts.ValidateCPUQuota(c.cpuquota); err != nil {
 		return nil, err
 	}
 
@@ -267,6 +255,13 @@ func (c *container) config() (*types.ContainerCreateConfig, error) {
 		},
 
 		NetworkingConfig: networkingConfig,
+	}
+
+	if c.nvidiaDriverCapabilities != "" || c.nvidiaVisibleDevices != "" {
+		config.HostConfig.Resources.NvidiaConfig = &types.NvidiaConfig{
+			NvidiaDriverCapabilities: c.nvidiaDriverCapabilities,
+			NvidiaVisibleDevices:     c.nvidiaVisibleDevices,
+		}
 	}
 
 	return config, nil

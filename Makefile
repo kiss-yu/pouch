@@ -50,14 +50,14 @@ COVERAGE_PACKAGES_LIST=$(shell echo $(COVERAGE_PACKAGES) | tr " " ",")
 build: build-daemon build-cli ## build PouchContainer both daemon and cli binaries
 
 build-daemon: modules ## build PouchContainer daemon binary
-	@echo $@
+	@echo "$@: bin/${DAEMON_BINARY_NAME}"
 	@mkdir -p bin
-	GOOS=linux go build -ldflags ${DEFAULT_LDFLAGS} -o bin/${DAEMON_BINARY_NAME} -tags 'selinux' 
+	@GOOS=linux go build -ldflags ${DEFAULT_LDFLAGS} -o bin/${DAEMON_BINARY_NAME} -tags 'selinux'
 
 build-cli: ## build PouchContainer cli binary
-	@echo $@
+	@echo "$@: bin/${CLI_BINARY_NAME}"
 	@mkdir -p bin
-	go build -o bin/${CLI_BINARY_NAME} github.com/alibaba/pouch/cli
+	@go build -o bin/${CLI_BINARY_NAME} github.com/alibaba/pouch/cli
 
 build-daemon-integration: modules ## build PouchContainer daemon integration testing binary
 	@echo $@
@@ -73,7 +73,7 @@ build-integration-test: modules ## build PouchContainer integration test-case bi
 		-o bin/${INTEGRATION_TESTCASE_BINARY_NAME} github.com/alibaba/pouch/test
 
 modules: ## run modules to generate volume related code
-	@echo $@
+	@echo "build volume $@"
 	@./hack/module --clean
 	@./hack/module --add-volume=github.com/alibaba/pouch/storage/volume/modules/tmpfs
 	@./hack/module --add-volume=github.com/alibaba/pouch/storage/volume/modules/local
@@ -89,16 +89,20 @@ uninstall: ## uninstall pouchd and pouch binary
 	@rm -f $(addprefix $(DEST_DIR)/bin/,$(notdir $(DAEMON_BINARY_NAME)))
 	@rm -f $(addprefix $(DEST_DIR)/bin/,$(notdir $(CLI_BINARY_NAME)))
 
-.PHONY: download_dependencies
-download_dependencies: ## download related dependencies, such as dumb_init
+.PHONY: package-dependencies
+package-dependencies: ## install containerd, runc and lxcfs dependencies for packaging
+	@echo $@
+	hack/install/install_containerd.sh
+	hack/install/install_lxcfs.sh
+	hack/install/install_runc.sh
+
+.PHONY: download-dependencies
+download-dependencies: package-dependencies ## install dumb-init, local-persist, nsenter and CI tools dependencies
 	@echo $@
 	hack/install/install_ci_related.sh
-	hack/install/install_containerd.sh
 	hack/install/install_dumb_init.sh
 	hack/install/install_local_persist.sh
-	hack/install/install_lxcfs.sh
 	hack/install/install_nsenter.sh
-	hack/install/install_runc.sh
 
 .PHONY: clean
 clean: ## clean to remove bin/* and files created by module

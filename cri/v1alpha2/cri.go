@@ -3,17 +3,20 @@ package v1alpha2
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"reflect"
+	goruntime "runtime"
 	"time"
 
 	apitypes "github.com/alibaba/pouch/apis/types"
 	anno "github.com/alibaba/pouch/cri/annotations"
 	runtime "github.com/alibaba/pouch/cri/apis/v1alpha2"
+	cni "github.com/alibaba/pouch/cri/ocicni"
 	"github.com/alibaba/pouch/daemon/config"
 	"github.com/alibaba/pouch/daemon/mgr"
 	"github.com/alibaba/pouch/pkg/errtypes"
@@ -70,6 +73,9 @@ const (
 
 	// snapshotPlugin implements a snapshotter.
 	snapshotPlugin = "io.containerd.snapshotter.v1"
+
+	// networkNotReadyReason is the reason reported when network is not ready.
+	networkNotReadyReason = "NetworkPluginNotReady"
 )
 
 var (
@@ -93,7 +99,7 @@ type CriMgr interface {
 type CriManager struct {
 	ContainerMgr mgr.ContainerMgr
 	ImageMgr     mgr.ImageMgr
-	CniMgr       CniMgr
+	CniMgr       cni.CniMgr
 
 	// StreamServer is the stream server of CRI serves container streaming request.
 	StreamServer Server
@@ -124,7 +130,7 @@ func NewCriManager(config *config.Config, ctrMgr mgr.ContainerMgr, imgMgr mgr.Im
 	c := &CriManager{
 		ContainerMgr:   ctrMgr,
 		ImageMgr:       imgMgr,
-		CniMgr:         NewCniManager(&config.CriConfig),
+		CniMgr:         cni.NewCniManager(&config.CriConfig),
 		StreamServer:   streamServer,
 		SandboxBaseDir: path.Join(config.HomeDir, "sandboxes"),
 		SandboxImage:   config.CriConfig.SandboxImage,
@@ -204,12 +210,15 @@ func (c *CriManager) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	defer func() {
 		// If running sandbox failed, clean up the container.
 		if retErr != nil {
-			c.ContainerMgr.Remove(ctx, id, &apitypes.ContainerRemoveOptions{Volumes: true, Force: true})
+			err := c.ContainerMgr.Remove(ctx, id, &apitypes.ContainerRemoveOptions{Volumes: true, Force: true})
+			if err != nil {
+				logrus.Errorf("failed to remove the container when running sandbox failed: %v", err)
+			}
 		}
 	}()
 
 	// Step 3: Start the sandbox container.
-	err = c.ContainerMgr.Start(ctx, id, "")
+	err = c.ContainerMgr.Start(ctx, id, &apitypes.ContainerStartOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to start sandbox container for pod %q: %v", config.Metadata.Name, err)
 	}
@@ -295,7 +304,7 @@ func (c *CriManager) StopPodSandbox(ctx context.Context, r *runtime.StopPodSandb
 	for _, container := range containers {
 		err = c.ContainerMgr.Stop(ctx, container.ID, defaultStopTimeout)
 		if err != nil {
-			// TODO: log an error message or break?
+			return nil, fmt.Errorf("failed to stop container %q of sandbox %q: %v", container.ID, podSandboxID, err)
 		}
 	}
 
@@ -360,7 +369,7 @@ func (c *CriManager) RemovePodSandbox(ctx context.Context, r *runtime.RemovePodS
 	for _, container := range containers {
 		err = c.ContainerMgr.Remove(ctx, container.ID, &apitypes.ContainerRemoveOptions{Volumes: true, Force: true})
 		if err != nil {
-			// TODO: log an error message or break?
+			return nil, fmt.Errorf("failed to remove container %q of sandbox %q: %v", container.ID, podSandboxID, err)
 		}
 	}
 
@@ -467,6 +476,11 @@ func (c *CriManager) ListPodSandbox(ctx context.Context, r *runtime.ListPodSandb
 		return nil, fmt.Errorf("failed to list sandbox: %v", err)
 	}
 
+	sandboxList, err = c.filterInvalidSandboxes(ctx, sandboxList)
+	if err != nil {
+		return nil, fmt.Errorf("failed to filter invalid sandboxes: %v", err)
+	}
+
 	sandboxes := make([]*runtime.PodSandbox, 0, len(sandboxList))
 	for _, s := range sandboxList {
 		sandbox, err := toCriSandbox(s)
@@ -549,7 +563,10 @@ func (c *CriManager) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	// Get container log.
 	if config.GetLogPath() != "" {
 		logPath := filepath.Join(sandboxConfig.GetLogDirectory(), config.GetLogPath())
-		err := c.attachLog(logPath, containerID)
+		// NOTE: If we attach log here, the IO of container will be created
+		// by this function first, so we should decide whether open the stdin
+		// here. It's weird actually, make it more elegant in the future.
+		err := c.attachLog(logPath, containerID, config.Stdin)
 		if err != nil {
 			return nil, err
 		}
@@ -561,7 +578,7 @@ func (c *CriManager) CreateContainer(ctx context.Context, r *runtime.CreateConta
 func (c *CriManager) StartContainer(ctx context.Context, r *runtime.StartContainerRequest) (*runtime.StartContainerResponse, error) {
 	containerID := r.GetContainerId()
 
-	err := c.ContainerMgr.Start(ctx, containerID, "")
+	err := c.ContainerMgr.Start(ctx, containerID, &apitypes.ContainerStartOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to start container %q: %v", containerID, err)
 	}
@@ -703,14 +720,29 @@ func (c *CriManager) ContainerStatus(ctx context.Context, r *runtime.ContainerSt
 
 	labels, annotations := extractLabels(container.Config.Labels)
 
-	imageRef := container.Image
-	imageInfo, err := c.ImageMgr.GetImage(ctx, imageRef)
+	// FIXME(fuwei): if user repush image with the same reference, the image
+	// ID will be changed. For now, pouch daemon will remove the old image ID
+	// so that CRI fails to fetch the running container. Before upgrade
+	// pouch daemon image manager, we use reference to get image instead of
+	// id.
+	imageInfo, err := c.ImageMgr.GetImage(ctx, container.Config.Image)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get image %s: %v", imageRef, err)
+		return nil, fmt.Errorf("failed to get image %s: %v", container.Config.Image, err)
 	}
+	imageRef := imageInfo.ID
 	if len(imageInfo.RepoDigests) > 0 {
 		imageRef = imageInfo.RepoDigests[0]
 	}
+
+	podSandboxID := container.Config.Labels[sandboxIDLabelKey]
+	res, err := c.SandboxStore.Get(podSandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get metadata of %q from SandboxStore: %v", podSandboxID, err)
+	}
+	sandboxMeta := res.(*SandboxMeta)
+	logDirectory := sandboxMeta.Config.GetLogDirectory()
+	// TODO: let the container manager handle the log stuff for CRI.
+	logPath := makeupLogPath(logDirectory, metadata)
 
 	resources := container.HostConfig.Resources
 	diskQuota := container.Config.DiskQuota
@@ -729,7 +761,7 @@ func (c *CriManager) ContainerStatus(ctx context.Context, r *runtime.ContainerSt
 		Message:     message,
 		Labels:      labels,
 		Annotations: annotations,
-		LogPath:     container.LogPath,
+		LogPath:     logPath,
 		Volumes:     parseVolumesFromPouch(container.Config.Volumes),
 		Resources:   parseResourcesFromPouch(resources, diskQuota),
 	}
@@ -919,14 +951,32 @@ func (c *CriManager) Status(ctx context.Context, r *runtime.StatusRequest) (*run
 		Status: true,
 	}
 
-	// TODO: check network status of CRI when it is ready.
+	// Check the status of the cni initialization
+	if err := c.CniMgr.Status(); err != nil {
+		networkCondition.Status = false
+		networkCondition.Reason = networkNotReadyReason
+		networkCondition.Message = fmt.Sprintf("Network plugin returns error: %v", err)
+	}
 
-	return &runtime.StatusResponse{
+	resp := &runtime.StatusResponse{
 		Status: &runtime.RuntimeStatus{Conditions: []*runtime.RuntimeCondition{
 			runtimeCondition,
 			networkCondition,
 		}},
-	}, nil
+	}
+
+	if r.Verbose {
+		resp.Info = make(map[string]string)
+		versionByt, err := json.Marshal(goruntime.Version())
+		if err != nil {
+			return nil, err
+		}
+		resp.Info["golang"] = string(versionByt)
+
+		// TODO return more info
+	}
+
+	return resp, nil
 }
 
 // ListImages lists existing images.

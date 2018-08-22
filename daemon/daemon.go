@@ -10,9 +10,9 @@ import (
 	"github.com/alibaba/pouch/apis/plugins"
 	"github.com/alibaba/pouch/apis/server"
 	criservice "github.com/alibaba/pouch/cri"
-	criconfig "github.com/alibaba/pouch/cri/config"
 	"github.com/alibaba/pouch/ctrd"
 	"github.com/alibaba/pouch/daemon/config"
+	"github.com/alibaba/pouch/daemon/events"
 	"github.com/alibaba/pouch/daemon/mgr"
 	"github.com/alibaba/pouch/internal"
 	"github.com/alibaba/pouch/network/mode"
@@ -39,6 +39,7 @@ type Daemon struct {
 	server          server.Server
 	containerPlugin plugins.ContainerPlugin
 	daemonPlugin    plugins.DaemonPlugin
+	eventsService   *events.Events
 }
 
 // router represents the router of daemon.
@@ -70,18 +71,13 @@ func NewDaemon(cfg *config.Config) *Daemon {
 		containerdBinaryFile = cfg.ContainerdPath
 	}
 
-	// the default unix socket path to the containerd socket
-	if cfg.IsCriEnabled {
-		cfg.Namespace = criconfig.K8sNamespace
-	}
-
 	containerd, err := ctrd.NewClient(cfg.HomeDir,
 		ctrd.WithDebugLog(cfg.Debug),
 		ctrd.WithStartDaemon(true),
 		ctrd.WithContainerdBinary(containerdBinaryFile),
 		ctrd.WithRPCAddr(cfg.ContainerdAddr),
 		ctrd.WithOOMScoreAdjust(cfg.OOMScoreAdjust),
-		ctrd.WithDefaultNamespace(cfg.Namespace),
+		ctrd.WithDefaultNamespace(cfg.DefaultNamespace),
 	)
 	if err != nil {
 		logrus.Errorf("failed to new containerd's client: %v", err)
@@ -154,6 +150,13 @@ func (d *Daemon) Run() error {
 	if err := d.loadPlugin(); err != nil {
 		return err
 	}
+
+	// initializes runtimes real path.
+	if err := initialRuntime(d.config.HomeDir, d.config.Runtimes); err != nil {
+		return err
+	}
+
+	d.eventsService = events.NewEvents()
 
 	imageMgr, err := internal.GenImageMgr(d.config, d)
 	if err != nil {
@@ -324,6 +327,11 @@ func (d *Daemon) ShutdownPlugin() error {
 		}
 	}
 	return nil
+}
+
+// EventsService gets Events instance
+func (d *Daemon) EventsService() *events.Events {
+	return d.eventsService
 }
 
 // addSystemLabels adds some system labels to daemon's config.

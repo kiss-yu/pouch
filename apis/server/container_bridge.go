@@ -68,13 +68,6 @@ func (s *Server) getContainer(ctx context.Context, rw http.ResponseWriter, req *
 		return err
 	}
 
-	var netSettings *types.NetworkSettings
-	if c.NetworkSettings != nil {
-		netSettings = &types.NetworkSettings{
-			Networks: c.NetworkSettings.Networks,
-		}
-	}
-
 	mounts := []types.MountPoint{}
 	for _, mp := range c.Mounts {
 		mounts = append(mounts, *mp)
@@ -94,7 +87,7 @@ func (s *Server) getContainer(ctx context.Context, rw http.ResponseWriter, req *
 			Data: c.Snapshotter.Data,
 		},
 		Mounts:          mounts,
-		NetworkSettings: netSettings,
+		NetworkSettings: c.NetworkSettings,
 	}
 
 	return EncodeResponse(rw, http.StatusOK, container)
@@ -156,9 +149,13 @@ func (s *Server) getContainers(ctx context.Context, rw http.ResponseWriter, req 
 func (s *Server) startContainer(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
 	name := mux.Vars(req)["name"]
 
-	detachKeys := req.FormValue("detachKeys")
+	options := &types.ContainerStartOptions{
+		DetachKeys:    req.FormValue("detachKeys"),
+		CheckpointID:  req.FormValue("checkpoint"),
+		CheckpointDir: req.FormValue("checkpoint-dir"),
+	}
 
-	if err := s.ContainerMgr.Start(ctx, name, detachKeys); err != nil {
+	if err := s.ContainerMgr.Start(ctx, name, options); err != nil {
 		return err
 	}
 
@@ -354,6 +351,27 @@ func (s *Server) logsContainer(ctx context.Context, rw http.ResponseWriter, req 
 	return nil
 }
 
+func (s *Server) statsContainer(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
+	name := mux.Vars(req)["name"]
+
+	var stream bool
+	if _, ok := req.Form["stream"]; !ok {
+		stream = true
+	}
+	stream = httputils.BoolValue(req, "stream")
+
+	if !stream {
+		rw.Header().Set("Content-Type", "application/json")
+	}
+
+	config := &mgr.ContainerStatsConfig{
+		Stream:    stream,
+		OutStream: rw,
+	}
+
+	return s.ContainerMgr.StreamStats(ctx, name, config)
+}
+
 func (s *Server) resizeContainer(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
 	height, err := strconv.Atoi(req.FormValue("h"))
 	if err != nil {
@@ -408,4 +426,61 @@ func (s *Server) waitContainer(ctx context.Context, rw http.ResponseWriter, req 
 	}
 
 	return EncodeResponse(rw, http.StatusOK, &waitStatus)
+}
+
+func (s *Server) createContainerCheckpoint(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
+	name := mux.Vars(req)["name"]
+
+	options := &types.CheckpointCreateOptions{}
+	if err := json.NewDecoder(req.Body).Decode(options); err != nil {
+		return httputils.NewHTTPError(err, http.StatusBadRequest)
+	}
+
+	// ensure CheckpointID should not be empty
+	if options.CheckpointID == "" {
+		return httputils.NewHTTPError(fmt.Errorf("checkpoint id should not be empty"), http.StatusBadRequest)
+	}
+
+	if err := s.ContainerMgr.CreateCheckpoint(ctx, name, options); err != nil {
+		return err
+	}
+
+	rw.WriteHeader(http.StatusCreated)
+	return nil
+}
+
+func (s *Server) listContainerCheckpoint(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
+	name := mux.Vars(req)["name"]
+
+	options := &types.CheckpointListOptions{
+		CheckpointDir: req.FormValue("dir"),
+	}
+
+	list, err := s.ContainerMgr.ListCheckpoint(ctx, name, options)
+	if err != nil {
+		return err
+	}
+
+	return EncodeResponse(rw, http.StatusOK, list)
+}
+
+func (s *Server) deleteContainerCheckpoint(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
+	name := mux.Vars(req)["name"]
+
+	options := &types.CheckpointDeleteOptions{
+		CheckpointID:  mux.Vars(req)["id"],
+		CheckpointDir: req.FormValue("dir"),
+	}
+
+	// ensure CheckpointID should not be empty
+	if options.CheckpointID == "" {
+		return httputils.NewHTTPError(fmt.Errorf("checkpoint id should not be empty"), http.StatusBadRequest)
+	}
+
+	if err := s.ContainerMgr.DeleteCheckpoint(ctx, name, options); err != nil {
+		return err
+	}
+
+	rw.WriteHeader(http.StatusNoContent)
+	return nil
 }

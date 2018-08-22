@@ -2,19 +2,19 @@ package mgr
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/alibaba/pouch/apis/opts"
 	"github.com/alibaba/pouch/apis/types"
 	networktypes "github.com/alibaba/pouch/network/types"
 	"github.com/alibaba/pouch/pkg/errtypes"
 	"github.com/alibaba/pouch/pkg/meta"
 	"github.com/alibaba/pouch/pkg/randomid"
-	"github.com/alibaba/pouch/pkg/system"
 
 	"github.com/opencontainers/selinux/go-selinux/label"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 // containerID returns the container's id, the parameter 'nameOrPrefix' may be container's
@@ -104,6 +104,29 @@ func (mgr *ContainerManager) generateName(id string) string {
 		}
 	}
 	return name
+}
+
+// getRuntime returns runtime real path.
+// TODO(huamin): do we need validate runtime is executable ?
+func (mgr *ContainerManager) getRuntime(runtime string) (string, error) {
+	r, exist := mgr.Config.Runtimes[runtime]
+	if !exist {
+		return "", fmt.Errorf("failed to find runtime %s in daemon config", runtime)
+	}
+
+	// it is ok to use runtime name as a path.
+	rPath := runtime
+	if len(r.RuntimeArgs) > 0 {
+		rPath = filepath.Join(mgr.Config.HomeDir, RuntimeDir, runtime)
+	}
+
+	// generally speaking, path is not be empty, but we not forbid empty path
+	// in config set, since name can be a path too.
+	if r.Path != "" {
+		rPath = r.Path
+	}
+
+	return rPath, nil
 }
 
 // BuildContainerEndpoint is used to build container's endpoint config.
@@ -226,151 +249,6 @@ func parsePSOutput(output []byte, pids []int) (*types.ContainerProcessList, erro
 	return procList, nil
 }
 
-// validateConfig validates container config
-func validateConfig(config *types.ContainerConfig, hostConfig *types.HostConfig, update bool) ([]string, error) {
-	// validates container hostconfig
-	warnings := make([]string, 0)
-	warns, err := validateResource(&hostConfig.Resources, update)
-	if err != nil {
-		return nil, err
-	}
-	warnings = append(warnings, warns...)
-
-	if hostConfig.OomScoreAdj < -1000 || hostConfig.OomScoreAdj > 1000 {
-		return warnings, fmt.Errorf("oom score should be in range [-1000, 1000]")
-	}
-
-	if hostConfig.ShmSize != nil && *hostConfig.ShmSize < 0 {
-		return warnings, fmt.Errorf("shm-size %d should greater than 0", *hostConfig.ShmSize)
-	}
-
-	// TODO: add more validate here
-	return warnings, nil
-}
-
-func validateResource(r *types.Resources, update bool) ([]string, error) {
-	cgroupInfo := system.NewCgroupInfo()
-	if cgroupInfo == nil {
-		return nil, nil
-	}
-	warnings := make([]string, 0, 64)
-
-	// validates memory cgroup value
-	if cgroupInfo.Memory != nil {
-		if r.Memory > 0 && !cgroupInfo.Memory.MemoryLimit {
-			logrus.Warn(MemoryWarn)
-			warnings = append(warnings, MemoryWarn)
-			r.Memory = 0
-			r.MemorySwap = 0
-		}
-		if r.MemorySwap > 0 && !cgroupInfo.Memory.MemorySwap {
-			logrus.Warn(MemorySwapWarn)
-			warnings = append(warnings, MemorySwapWarn)
-			r.MemorySwap = 0
-		}
-		if r.Memory != 0 && r.Memory < MinMemory {
-			return warnings, fmt.Errorf("Minimal memory should greater than 4M")
-		}
-		if r.Memory > 0 && r.MemorySwap > 0 && r.MemorySwap < 2*r.Memory {
-			warnings = append(warnings, "You should typically size your swap space to approximately 2x main memory for systems with less than 2GB of RAM")
-		}
-		if r.MemorySwappiness != nil && !cgroupInfo.Memory.MemorySwappiness {
-			logrus.Warn(MemorySwappinessWarn)
-			warnings = append(warnings, MemorySwappinessWarn)
-			r.MemorySwappiness = nil
-		}
-		if r.MemorySwappiness != nil && (*r.MemorySwappiness < 0 || *r.MemorySwappiness > 100) {
-			return warnings, fmt.Errorf("MemorySwappiness should in range [-1, 100]")
-		}
-		if r.OomKillDisable != nil && !cgroupInfo.Memory.OOMKillDisable {
-			logrus.Warn(OOMKillWarn)
-			warnings = append(warnings, OOMKillWarn)
-			r.OomKillDisable = nil
-		}
-	}
-
-	// validates cpu cgroup value
-	if cgroupInfo.CPU != nil {
-		if r.CpusetCpus != "" && !cgroupInfo.CPU.CpusetCpus {
-			logrus.Warn(CpusetCpusWarn)
-			warnings = append(warnings, CpusetCpusWarn)
-			r.CpusetCpus = ""
-		}
-		if r.CpusetMems != "" && !cgroupInfo.CPU.CpusetMems {
-			logrus.Warn(CpusetMemsWarn)
-			warnings = append(warnings, CpusetMemsWarn)
-			r.CpusetMems = ""
-		}
-		if r.CPUShares > 0 && !cgroupInfo.CPU.CPUShares {
-			logrus.Warn(CPUSharesWarn)
-			warnings = append(warnings, CPUSharesWarn)
-			r.CPUShares = 0
-		}
-		if r.CPUQuota > 0 && !cgroupInfo.CPU.CPUQuota {
-			logrus.Warn(CPUQuotaWarn)
-			warnings = append(warnings, CPUQuotaWarn)
-			r.CPUQuota = 0
-		}
-		// cpu.cfs_quota_us can accept value less than 0, we allow -1 and > 1000
-		if r.CPUQuota > 0 && r.CPUQuota < 1000 {
-			return warnings, fmt.Errorf("CPU cfs quota should be greater than 1ms(1000)")
-		}
-		if r.CPUPeriod > 0 && !cgroupInfo.CPU.CPUPeriod {
-			logrus.Warn(CPUPeriodWarn)
-			warnings = append(warnings, CPUPeriodWarn)
-			r.CPUPeriod = 0
-		}
-		if r.CPUPeriod != 0 && (r.CPUPeriod < 1000 || r.CPUPeriod > 1000000) {
-			return warnings, fmt.Errorf("CPU cfs period should be in range [1000, 1000000](1ms, 1s)")
-		}
-	}
-
-	// validates blkio cgroup value
-	if cgroupInfo.Blkio != nil {
-		if r.BlkioWeight > 0 && !cgroupInfo.Blkio.BlkioWeight {
-			logrus.Warn(BlkioWeightWarn)
-			warnings = append(warnings, BlkioWeightWarn)
-			r.BlkioWeight = 0
-		}
-		if len(r.BlkioWeightDevice) > 0 && !cgroupInfo.Blkio.BlkioWeightDevice {
-			logrus.Warn(BlkioWeightDeviceWarn)
-			warnings = append(warnings, BlkioWeightDeviceWarn)
-			r.BlkioWeightDevice = []*types.WeightDevice{}
-		}
-		if len(r.BlkioDeviceReadBps) > 0 && !cgroupInfo.Blkio.BlkioDeviceReadBps {
-			logrus.Warn(BlkioDeviceReadBpsWarn)
-			warnings = append(warnings, BlkioDeviceReadBpsWarn)
-			r.BlkioDeviceReadBps = []*types.ThrottleDevice{}
-		}
-		if len(r.BlkioDeviceWriteBps) > 0 && !cgroupInfo.Blkio.BlkioDeviceWriteBps {
-			logrus.Warn(BlkioDeviceWriteBpsWarn)
-			warnings = append(warnings, BlkioDeviceWriteBpsWarn)
-			r.BlkioDeviceWriteBps = []*types.ThrottleDevice{}
-		}
-		if len(r.BlkioDeviceReadIOps) > 0 && !cgroupInfo.Blkio.BlkioDeviceReadIOps {
-			logrus.Warn(BlkioDeviceReadIOpsWarn)
-			warnings = append(warnings, BlkioDeviceReadIOpsWarn)
-			r.BlkioDeviceReadIOps = []*types.ThrottleDevice{}
-		}
-		if len(r.BlkioDeviceWriteIOps) > 0 && !cgroupInfo.Blkio.BlkioDeviceWriteIOps {
-			logrus.Warn(BlkioDeviceWriteIOpsWarn)
-			warnings = append(warnings, BlkioDeviceWriteIOpsWarn)
-			r.BlkioDeviceWriteIOps = []*types.ThrottleDevice{}
-		}
-	}
-
-	// validates pid cgroup value
-	if cgroupInfo.Pids != nil {
-		if r.PidsLimit != 0 && !cgroupInfo.Pids.Pids {
-			logrus.Warn(PidsLimitWarn)
-			warnings = append(warnings, PidsLimitWarn)
-			r.PidsLimit = 0
-		}
-	}
-
-	return warnings, nil
-}
-
 // amendContainerSettings modify config settings to wanted,
 // it will be call before container created.
 func amendContainerSettings(config *types.ContainerConfig, hostConfig *types.HostConfig) {
@@ -378,4 +256,46 @@ func amendContainerSettings(config *types.ContainerConfig, hostConfig *types.Hos
 	if r.Memory > 0 && r.MemorySwap == 0 {
 		r.MemorySwap = 2 * r.Memory
 	}
+}
+
+func mergeEnvSlice(newEnv, oldEnv []string) ([]string, error) {
+	// if newEnv is empty, return old env slice
+	if len(newEnv) == 0 {
+		return oldEnv, nil
+	}
+
+	newEnvMap, err := opts.ParseEnv(newEnv)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to parse new env")
+	}
+
+	oldEnvMap, err := opts.ParseEnv(oldEnv)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to parse old env")
+	}
+
+	for k, v := range newEnvMap {
+		// key should not be empty
+		if k == "" {
+			continue
+		}
+
+		// add or change an env
+		if v != "" {
+			oldEnvMap[k] = v
+			continue
+		}
+
+		// value is empty, we need delete the env
+		if _, exists := oldEnvMap[k]; exists {
+			delete(oldEnvMap, k)
+		}
+	}
+
+	newEnvSlice := []string{}
+	for k, v := range oldEnvMap {
+		newEnvSlice = append(newEnvSlice, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	return newEnvSlice, nil
 }

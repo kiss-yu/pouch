@@ -28,11 +28,15 @@ func initRoute(s *Server) http.Handler {
 	s.addRoute(r, http.MethodGet, "/info", s.info)
 	s.addRoute(r, http.MethodGet, "/version", s.version)
 	s.addRoute(r, http.MethodPost, "/auth", s.auth)
+	s.addRoute(r, http.MethodGet, "/events", s.events)
 
 	// daemon, we still list this API into system manager.
 	s.addRoute(r, http.MethodPost, "/daemon/update", s.updateDaemon)
 
 	// container
+	s.addRoute(r, http.MethodPost, "/containers/{name:.*}/checkpoints", withCancelHandler(s.createContainerCheckpoint))
+	s.addRoute(r, http.MethodGet, "/containers/{name:.*}/checkpoints", withCancelHandler(s.listContainerCheckpoint))
+	s.addRoute(r, http.MethodDelete, "/containers/{name}/checkpoints/{id}", withCancelHandler(s.deleteContainerCheckpoint))
 	s.addRoute(r, http.MethodPost, "/containers/create", s.createContainer)
 	s.addRoute(r, http.MethodPost, "/containers/{name:.*}/start", s.startContainer)
 	s.addRoute(r, http.MethodPost, "/containers/{name:.*}/stop", s.stopContainer)
@@ -43,6 +47,7 @@ func initRoute(s *Server) http.Handler {
 	s.addRoute(r, http.MethodPost, "/containers/{name:.*}/exec", s.createContainerExec)
 	s.addRoute(r, http.MethodGet, "/exec/{name:.*}/json", s.getExecInfo)
 	s.addRoute(r, http.MethodPost, "/exec/{name:.*}/start", s.startContainerExec)
+	s.addRoute(r, http.MethodPost, "/exec/{name:.*}/resize", s.resizeExec)
 	s.addRoute(r, http.MethodPost, "/containers/{name:.*}/rename", s.renameContainer)
 	s.addRoute(r, http.MethodPost, "/containers/{name:.*}/restart", s.restartContainer)
 	s.addRoute(r, http.MethodPost, "/containers/{name:.*}/pause", s.pauseContainer)
@@ -51,6 +56,7 @@ func initRoute(s *Server) http.Handler {
 	s.addRoute(r, http.MethodPost, "/containers/{name:.*}/upgrade", s.upgradeContainer)
 	s.addRoute(r, http.MethodGet, "/containers/{name:.*}/top", s.topContainer)
 	s.addRoute(r, http.MethodGet, "/containers/{name:.*}/logs", withCancelHandler(s.logsContainer))
+	s.addRoute(r, http.MethodGet, "/containers/{name:.*}/stats", withCancelHandler(s.statsContainer))
 	s.addRoute(r, http.MethodPost, "/containers/{name:.*}/resize", s.resizeContainer)
 	s.addRoute(r, http.MethodPost, "/containers/{name:.*}/restart", s.restartContainer)
 	s.addRoute(r, http.MethodPost, "/containers/{name:.*}/wait", withCancelHandler(s.waitContainer))
@@ -64,6 +70,7 @@ func initRoute(s *Server) http.Handler {
 	s.addRoute(r, http.MethodPost, "/images/{name:.*}/tag", s.postImageTag)
 	s.addRoute(r, http.MethodPost, "/images/load", withCancelHandler(s.loadImage))
 	s.addRoute(r, http.MethodGet, "/images/save", withCancelHandler(s.saveImage))
+	s.addRoute(r, http.MethodGet, "/images/{name:.*}/history", s.getImageHistory)
 
 	// volume
 	s.addRoute(r, http.MethodGet, "/volumes", s.listVolume)

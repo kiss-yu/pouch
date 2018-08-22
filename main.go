@@ -72,7 +72,7 @@ func setupFlags(cmd *cobra.Command) {
 	flagSet.StringArrayVarP(&cfg.Listen, "listen", "l", []string{"unix:///var/run/pouchd.sock"}, "Specify listening addresses of Pouchd")
 	flagSet.BoolVar(&cfg.IsCriEnabled, "enable-cri", false, "Specify whether enable the cri part of pouchd which is used to support Kubernetes")
 	flagSet.StringVar(&cfg.CriConfig.CriVersion, "cri-version", "v1alpha2", "Specify the version of cri which is used to support Kubernetes")
-	flagSet.StringVar(&cfg.CriConfig.Listen, "listen-cri", "/var/run/pouchcri.sock", "Specify listening address of CRI")
+	flagSet.StringVar(&cfg.CriConfig.Listen, "listen-cri", "unix:///var/run/pouchcri.sock", "Specify listening address of CRI")
 	flagSet.StringVar(&cfg.CriConfig.NetworkPluginBinDir, "cni-bin-dir", "/opt/cni/bin", "The directory for putting cni plugin binaries.")
 	flagSet.StringVar(&cfg.CriConfig.NetworkPluginConfDir, "cni-conf-dir", "/etc/cni/net.d", "The directory for putting cni plugin configuration files.")
 	flagSet.StringVar(&cfg.CriConfig.SandboxImage, "sandbox-image", "registry.cn-hangzhou.aliyuncs.com/google-containers/pause-amd64:3.0", "The image used by sandbox container.")
@@ -121,6 +121,11 @@ func setupFlags(cmd *cobra.Command) {
 	flagSet.StringVar(&cfg.Pidfile, "pidfile", "/var/run/pouch.pid", "Save daemon pid")
 	flagSet.IntVar(&cfg.OOMScoreAdjust, "oom-score-adj", -500, "Set the oom_score_adj for the daemon")
 	flagSet.Var(optscfg.NewRuntime(&cfg.Runtimes), "add-runtime", "register a OCI runtime to daemon")
+
+	// Notes(ziren): default-namespace is passed to containerd, the default
+	// value is 'default'. So if IsCriEnabled is true for k8s, we should set the DefaultNamespace
+	// to k8s.io
+	flagSet.StringVar(&cfg.DefaultNamespace, "default-namespace", namespaces.Default, "default-namespace is passed to containerd, the default value is 'default'")
 }
 
 // runDaemon prepares configs, setups essential details and runs pouchd daemon.
@@ -128,9 +133,6 @@ func runDaemon(cmd *cobra.Command) error {
 	if err := loadDaemonFile(cfg, cmd.Flags()); err != nil {
 		return fmt.Errorf("failed to load daemon file: %s", err)
 	}
-
-	// set containerd namespace, we use containerd default namespace as pouch namespaces
-	cfg.Namespace = namespaces.Default
 
 	// parse log driver config
 	logOptMap, err := opts.ParseLogOptions(cfg.DefaultLogConfig.LogDriver, logOpts)

@@ -9,6 +9,7 @@ import (
 
 	apitypes "github.com/alibaba/pouch/apis/types"
 	"github.com/alibaba/pouch/daemon/config"
+	"github.com/alibaba/pouch/daemon/events"
 	"github.com/alibaba/pouch/network"
 	"github.com/alibaba/pouch/network/types"
 	"github.com/alibaba/pouch/pkg/errtypes"
@@ -57,13 +58,14 @@ type NetworkMgr interface {
 
 // NetworkManager is the default implement of interface NetworkMgr.
 type NetworkManager struct {
-	store      *meta.Store
-	controller libnetwork.NetworkController
-	config     network.Config
+	store         *meta.Store
+	controller    libnetwork.NetworkController
+	config        network.Config
+	eventsService *events.Events
 }
 
 // NewNetworkManager creates a brand new network manager.
-func NewNetworkManager(cfg *config.Config, store *meta.Store, ctrMgr ContainerMgr) (*NetworkManager, error) {
+func NewNetworkManager(cfg *config.Config, store *meta.Store, ctrMgr ContainerMgr, eventsService *events.Events) (*NetworkManager, error) {
 	// Create a new controller instance
 	if cfg.NetworkConfig.MetaPath == "" {
 		cfg.NetworkConfig.MetaPath = path.Dir(store.BaseDir)
@@ -105,9 +107,10 @@ func NewNetworkManager(cfg *config.Config, store *meta.Store, ctrMgr ContainerMg
 	}
 
 	return &NetworkManager{
-		store:      store,
-		controller: controller,
-		config:     cfg.NetworkConfig,
+		store:         store,
+		controller:    controller,
+		config:        cfg.NetworkConfig,
+		eventsService: eventsService,
 	}, nil
 }
 
@@ -137,6 +140,8 @@ func (nm *NetworkManager) Create(ctx context.Context, create apitypes.NetworkCre
 		Type:    driver,
 		Network: net,
 	}
+
+	nm.LogNetworkEvent(ctx, net, "create")
 
 	return &network, nil
 }
@@ -190,7 +195,12 @@ func (nm *NetworkManager) Remove(ctx context.Context, name string) error {
 		return nil
 	}
 
-	return nw.Delete()
+	if err := nw.Delete(); err != nil {
+		return err
+	}
+
+	nm.LogNetworkEvent(ctx, nw, "destroy")
+	return nil
 }
 
 // GetNetworkByName returns the information of network that specified name.
@@ -456,6 +466,8 @@ func controllerOptions(cfg network.Config) ([]nwconfig.Option, error) {
 
 	options = append(options, nwconfig.OptionDefaultDriver("bridge"))
 	options = append(options, nwconfig.OptionDefaultNetwork("bridge"))
+	options = append(options, nwconfig.OptionNetworkControlPlaneMTU(cfg.BridgeConfig.Mtu))
+	options = append(options, nwconfig.OptionExperimental(false))
 
 	// set bridge options
 	options = append(options, bridgeDriverOptions(cfg.BridgeConfig))

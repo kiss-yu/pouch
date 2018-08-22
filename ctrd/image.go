@@ -15,7 +15,6 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/errdefs"
 	ctrdmetaimages "github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/remotes"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -25,6 +24,15 @@ import (
 
 // CreateImageReference creates the image in the meta data in the containerd.
 func (c *Client) CreateImageReference(ctx context.Context, img ctrdmetaimages.Image) (ctrdmetaimages.Image, error) {
+	image, err := c.createImageReference(ctx, img)
+	if err != nil {
+		return image, convertCtrdErr(err)
+	}
+	return image, nil
+}
+
+// createImageReference creates the image in the meta data in the containerd.
+func (c *Client) createImageReference(ctx context.Context, img ctrdmetaimages.Image) (ctrdmetaimages.Image, error) {
 	wrapperCli, err := c.Get(ctx)
 	if err != nil {
 		return ctrdmetaimages.Image{}, fmt.Errorf("failed to get a containerd grpc client: %v", err)
@@ -35,6 +43,15 @@ func (c *Client) CreateImageReference(ctx context.Context, img ctrdmetaimages.Im
 
 // GetImage returns the containerd's Image.
 func (c *Client) GetImage(ctx context.Context, ref string) (containerd.Image, error) {
+	img, err := c.getImage(ctx, ref)
+	if err != nil {
+		return img, convertCtrdErr(err)
+	}
+	return img, nil
+}
+
+// getImage returns the containerd's Image.
+func (c *Client) getImage(ctx context.Context, ref string) (containerd.Image, error) {
 	wrapperCli, err := c.Get(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get a containerd grpc client: %v", err)
@@ -45,6 +62,15 @@ func (c *Client) GetImage(ctx context.Context, ref string) (containerd.Image, er
 
 // ListImages lists all images.
 func (c *Client) ListImages(ctx context.Context, filter ...string) ([]containerd.Image, error) {
+	imgs, err := c.listImages(ctx, filter...)
+	if err != nil {
+		return imgs, convertCtrdErr(err)
+	}
+	return imgs, nil
+}
+
+// listImages lists all images.
+func (c *Client) listImages(ctx context.Context, filter ...string) ([]containerd.Image, error) {
 	wrapperCli, err := c.Get(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get a containerd grpc client: %v", err)
@@ -55,6 +81,14 @@ func (c *Client) ListImages(ctx context.Context, filter ...string) ([]containerd
 
 // RemoveImage deletes an image.
 func (c *Client) RemoveImage(ctx context.Context, ref string) error {
+	if err := c.removeImage(ctx, ref); err != nil {
+		return convertCtrdErr(err)
+	}
+	return nil
+}
+
+// removeImage deletes an image.
+func (c *Client) removeImage(ctx context.Context, ref string) error {
 	wrapperCli, err := c.Get(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get a containerd grpc client: %v", err)
@@ -68,6 +102,15 @@ func (c *Client) RemoveImage(ctx context.Context, ref string) error {
 
 // SaveImage saves image to tarstream
 func (c *Client) SaveImage(ctx context.Context, exporter ctrdmetaimages.Exporter, ref string) (io.ReadCloser, error) {
+	r, err := c.saveImage(ctx, exporter, ref)
+	if err != nil {
+		return r, convertCtrdErr(err)
+	}
+	return r, nil
+}
+
+// saveImage saves image to tarstream
+func (c *Client) saveImage(ctx context.Context, exporter ctrdmetaimages.Exporter, ref string) (io.ReadCloser, error) {
 	wrapperCli, err := c.Get(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get a containerd grpc client: %v", err)
@@ -94,18 +137,24 @@ func (c *Client) SaveImage(ctx context.Context, exporter ctrdmetaimages.Exporter
 		}
 	}
 
-	exportedStream, err := wrapperCli.client.Export(ctx, exporter, desc)
-	if err != nil {
-		return nil, err
-	}
-
-	return exportedStream, nil
+	return wrapperCli.client.Export(ctx, exporter, desc)
 }
 
 // ImportImage creates a set of images by tarstream.
 //
 // NOTE: One tar may have several manifests.
 func (c *Client) ImportImage(ctx context.Context, importer ctrdmetaimages.Importer, reader io.Reader) ([]containerd.Image, error) {
+	imgs, err := c.importImage(ctx, importer, reader)
+	if err != nil {
+		return imgs, convertCtrdErr(err)
+	}
+	return imgs, nil
+}
+
+// importImage creates a set of images by tarstream.
+//
+// NOTE: One tar may have several manifests.
+func (c *Client) importImage(ctx context.Context, importer ctrdmetaimages.Importer, reader io.Reader) ([]containerd.Image, error) {
 	wrapperCli, err := c.Get(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get a containerd grpc client: %v", err)
@@ -185,6 +234,7 @@ func (c *Client) PullImage(ctx context.Context, ref string, authConfig *types.Au
 				Code:    http.StatusInternalServerError,
 				Message: err.Error(),
 			},
+			ErrorMessage: err.Error(),
 		}
 		stream.WriteObject(message)
 		return nil, err
@@ -195,8 +245,6 @@ func (c *Client) PullImage(ctx context.Context, ref string, authConfig *types.Au
 }
 
 func (c *Client) pullImage(ctx context.Context, wrapperCli *WrapperClient, ref string, options []containerd.RemoteOpt) (containerd.Image, error) {
-	ctx = leases.WithLease(ctx, wrapperCli.lease.ID())
-
 	img, err := wrapperCli.client.Pull(ctx, ref, options...)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to pull image")

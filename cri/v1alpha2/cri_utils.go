@@ -20,7 +20,9 @@ import (
 
 	"github.com/containerd/cgroups"
 	"github.com/containerd/typeurl"
+	"github.com/cri-o/ocicni/pkg/ocicni"
 	"github.com/go-openapi/strfmt"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 )
 
@@ -307,6 +309,43 @@ func toCriSandbox(c *mgr.Container) (*runtime.PodSandbox, error) {
 	}, nil
 }
 
+// It has the possibility that we failed to run the sandbox and it is not being cleaned up.
+// Kubelet will use list to get the sandboxes, but will not get the status of the failed pod
+// whose meta data has not been put into the Sandbox Store. And Kubelet will keep trying to
+// get the status of the failed pod and won't create a new one to replace it. It's a DEAD LOCK.
+// Actually Kubelet should not know the existence of invalid pod whose meta data won't be in the
+// Sandbox Store. So we could avoid the DEAD LOCK mentioned above.
+func (c *CriManager) filterInvalidSandboxes(ctx context.Context, sandboxes []*mgr.Container) ([]*mgr.Container, error) {
+	validSandboxes, err := c.SandboxStore.Keys()
+	if err != nil {
+		return nil, err
+	}
+
+	var result []*mgr.Container
+	for _, sandbox := range sandboxes {
+		exist := false
+		for _, id := range validSandboxes {
+			if sandbox.ID == id {
+				exist = true
+				break
+			}
+		}
+		if exist {
+			result = append(result, sandbox)
+			continue
+		}
+
+		status := sandbox.State.Status
+		// NOTE: what if the worst case that we failed to remove the sandbox and
+		// it is still running?
+		if status != apitypes.StatusRunning && status != apitypes.StatusCreated {
+			logrus.Warnf("filterInvalidSandboxes: remove invalid sandbox %v", sandbox.ID)
+			c.ContainerMgr.Remove(ctx, sandbox.ID, &apitypes.ContainerRemoveOptions{Volumes: true, Force: true})
+		}
+	}
+	return result, nil
+}
+
 func filterCRISandboxes(sandboxes []*runtime.PodSandbox, filter *runtime.PodSandboxFilter) []*runtime.PodSandbox {
 	if filter == nil {
 		return sandboxes
@@ -441,6 +480,11 @@ func parseContainerName(name string) (*runtime.ContainerMetadata, error) {
 		Name:    parts[1],
 		Attempt: attempt,
 	}, nil
+}
+
+// makeupLogPath makes up the log path of container from log directory and its metadata.
+func makeupLogPath(logDirectory string, metadata *runtime.ContainerMetadata) string {
+	return filepath.Join(logDirectory, metadata.Name, fmt.Sprintf("%d.log", metadata.Attempt))
 }
 
 // modifyContainerNamespaceOptions apply namespace options for container.
@@ -822,13 +866,14 @@ func parseUserFromImageUser(id string) string {
 	return id
 }
 
-func (c *CriManager) attachLog(logPath string, containerID string) error {
+func (c *CriManager) attachLog(logPath string, containerID string, openStdin bool) error {
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0640)
 	if err != nil {
 		return fmt.Errorf("failed to create container for opening log file failed: %v", err)
 	}
 	// Attach to the container to get log.
 	attachConfig := &mgr.AttachConfig{
+		Stdin:      openStdin,
 		Stdout:     true,
 		Stderr:     true,
 		CriLogFile: f,
@@ -843,7 +888,7 @@ func (c *CriManager) attachLog(logPath string, containerID string) error {
 func (c *CriManager) getContainerMetrics(ctx context.Context, meta *mgr.Container) (*runtime.ContainerStats, error) {
 	var usedBytes, inodesUsed uint64
 
-	stats, err := c.ContainerMgr.Stats(ctx, meta.ID)
+	stats, _, err := c.ContainerMgr.Stats(ctx, meta.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get stats of container %q: %v", meta.ID, err)
 	}
@@ -1038,4 +1083,23 @@ func parseVolumesFromPouch(containerVolumes map[string]interface{}) map[string]*
 		volumes[k] = &runtime.Volume{}
 	}
 	return volumes
+}
+
+// CNI Network related tool functions.
+
+// toCNIPortMappings converts CRI port mappings to CNI.
+func toCNIPortMappings(criPortMappings []*runtime.PortMapping) []ocicni.PortMapping {
+	var portMappings []ocicni.PortMapping
+	for _, mapping := range criPortMappings {
+		if mapping.HostPort <= 0 {
+			continue
+		}
+		portMappings = append(portMappings, ocicni.PortMapping{
+			HostPort:      mapping.HostPort,
+			ContainerPort: mapping.ContainerPort,
+			Protocol:      strings.ToLower(mapping.Protocol.String()),
+			HostIP:        mapping.HostIp,
+		})
+	}
+	return portMappings
 }
